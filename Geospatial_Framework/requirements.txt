@@ -6,7 +6,8 @@ shapely
 matplotlib
 seaborn
 scikit-learn
-
+plotly
+quackosm
 # Geospatial & H3
 h3
 srai
