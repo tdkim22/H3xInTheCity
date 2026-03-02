@@ -1,0 +1,17 @@
+# Core Data Science
+numpy
+pandas
+geopandas
+shapely
+matplotlib
+seaborn
+scikit-learn
+
+# Geospatial & H3
+h3
+srai
+hdbscan
+
+# Deep Learning (for Hex2Vec)
+torch
+pytorch-lightning
