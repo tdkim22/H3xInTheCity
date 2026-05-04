@@ -2,10 +2,8 @@
 !pip install srai
 !pip install srai[osm]
 !pip install pytorch_lightning
-!pip install hdbscan
 !pip install torch
 !pip install contextily
-!pip install minisom
 
 # --- 1. System & Warning Suppression ---
 import os
