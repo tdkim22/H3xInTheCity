@@ -24,3 +24,4 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 cluster_map.save(os.path.join(OUTPUT_DIR, f"{model_name}_K{k_ring}_R{resolution}.html"))
 ```
   Also, you will need to change any calls to the `display("object")` function to `print("object")`.
+To run your code in the terminal, navigate to the folder where your script is and run `python YourCode.py`. To install packages permanently, run `pip install --user PackageNameHere`.
