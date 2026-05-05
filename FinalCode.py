@@ -1,0 +1,351 @@
+!pip install h3
+!pip install srai
+!pip install srai[osm]
+!pip install pytorch_lightning
+!pip install torch
+!pip install contextily
+
+# --- 1. System & Warning Suppression ---
+import os
+import warnings
+import logging
+
+# Filter specific annoying warnings that clutter client outputs
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore', FutureWarning)
+warnings.simplefilter('ignore', UserWarning)
+warnings.simplefilter('ignore', DeprecationWarning)
+os.environ["PYTHONWARNINGS"] = "ignore" # Suppress at system level
+
+# Silence Pytorch Lightning & Library logs
+logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+logging.getLogger("srai").setLevel(logging.WARNING)
+
+# --- 2. Data Manipulation & Math ---
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+from shapely import wkt
+import itertools
+
+# --- 3. Geospatial & H3 ---
+import h3
+from srai.loaders import OSMPbfLoader
+from srai.regionalizers import geocode_to_region_gdf, H3Regionalizer
+from srai.joiners import IntersectionJoiner
+from srai.embedders import Hex2VecEmbedder
+from srai.neighbourhoods import H3Neighbourhood
+from srai.loaders.osm_loaders.filters import HEX2VEC_FILTER # This filter is used for loading specific OSM data
+from srai.plotting import plot_regions
+
+# --- 4. Machine Learning & Torch ---
+import torch
+from pytorch_lightning.callbacks import TQDMProgressBar
+from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
+from sklearn.cluster import KMeans
+import hdbscan
+from sklearn.metrics import adjusted_rand_score, silhouette_score
+
+# --- 5. Visualization ---
+import matplotlib.pyplot as plt
+import seaborn as sns
+import folium
+import matplotlib.colors as mcolors
+
+# --- 6. Configuration ---
+# Set Matmul precision for Torch
+torch.set_float32_matmul_precision('medium')
+
+# Pandas display options
+pd.set_option('display.max_columns', None)
+pd.set_option('mode.chained_assignment', None)
+
+# Matplotlib inline
+# %matplotlib inline
+
+print("Libraries loaded. Environment configured for clean output.")
+
+# =====================================================
+# 2.1 GLOBAL REPRODUCIBILITY SETUP
+# =====================================================
+# Setting seeds ensures that the Neural Network (Hex2Vec)
+# and other stochastic processes produce the exact same
+# results every time you run this notebook.
+
+import random
+import pytorch_lightning as pl
+
+def set_global_seed(seed=42):
+    # 1. Python's built-in random module
+    random.seed(seed)
+
+    # 2. NumPy (used for mathematical operations and arrays)
+    np.random.seed(seed)
+
+    # 3. PyTorch (used by Hex2Vec for weights initialization)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    # 4. PyTorch Lightning (manages the training loop)
+    # This is the most important one for the SRAI library
+    pl.seed_everything(seed, workers=True)
+
+# Apply the seed
+set_global_seed(42)
+print("Global random seed set to 42 for reproducibility.")
+
+RES = 10
+area = geocode_to_region_gdf("Blacksburg, VA")
+loader = OSMPbfLoader()
+loader_gdf = loader.load(area, HEX2VEC_FILTER)
+regionalizer = H3Regionalizer(resolution=RES)
+regions_gdf = regionalizer.transform(loader_gdf)
+if regions_gdf.index.name != 'region_id':
+    regions_gdf.index.name = 'region_id'
+joiner = IntersectionJoiner()
+joint_gdf = joiner.transform(regions_gdf, loader_gdf)
+feature_columns = list(HEX2VEC_FILTER.keys())
+present_cols = [c for c in feature_columns if c in loader_gdf.columns]
+binary_feature_df = pd.DataFrame(index=loader_gdf.index)
+for col in present_cols:
+    binary_feature_df[col] = loader_gdf[col].notna().astype(np.int8)
+binary_feature_df.index.name = "feature_id"
+
+joint_pd = joint_gdf.reset_index()
+merged_df = joint_pd.merge(
+    loader_gdf[feature_columns], # Select only the feature columns from loader_gdf
+    left_on='feature_id',
+    right_index=True, # Merge on loader_gdf's index ('feature_id')
+    how='left'
+)
+features_per_hex = merged_df.groupby('region_id')[feature_columns].sum()
+#features_per_hex = features_per_hex.loc[regions_gdf.index]
+features_per_hex.rename(columns={'region_id_left': 'region_id'}, inplace=True)
+regions_gdf_filtered = gpd.sjoin(regions_gdf, area, predicate='intersects', how='inner')
+regions_gdf = regions_gdf_filtered
+
+neighbors = H3Neighbourhood(regions_gdf)
+embedder = Hex2VecEmbedder(
+    encoder_sizes=[256, 128, 64] # Neural network architecture
+)
+
+if regions_gdf.index.name != 'region_id':
+    regions_gdf.index.name = 'region_id'
+
+embeddings = embedder.fit_transform(
+    regions_gdf,
+    loader_gdf,
+    joint_gdf,
+    neighbors,
+    batch_size=1024, # Batch size for training 2048
+    learning_rate=0.001, # Learning rate for optimizer
+    trainer_kwargs={
+        "max_epochs": 5, # Number of training epochs 40
+        "accelerator": "auto", # Use GPU if available
+        "enable_progress_bar": True, # Show progress bar
+        "logger": False,  # Disables the CSV logging to keep output clean
+        "enable_checkpointing": False, # Disables saving intermediate weights
+        #"callbacks": [TQDMProgressBar(refresh_rate=1)]#different
+    }
+)
+
+coords = []
+for h3_idx in embeddings.index:
+    # h3.cell_to_latlng returns (lat, lon)
+    lat, lng = h3.cell_to_latlng(h3_idx)
+    coords.append([lat, lng])
+
+coords_array = np.array(coords)
+
+scaler = StandardScaler()
+scaled_coords = scaler.fit_transform(coords_array)
+
+LOCATION_WEIGHT = 0.65 # Adjust this value as needed
+embeddings_augmented = np.hstack([embeddings.to_numpy(), scaled_coords * LOCATION_WEIGHT])
+
+weighted_features = embeddings_augmented
+
+unique_rows = len(np.unique(weighted_features, axis=0))
+dup_rate = 100 - (unique_rows / len(weighted_features) * 100)
+
+print(f"Original Embedding Shape:  {embeddings.shape}")
+print(f"Augmented Embedding Shape: {weighted_features.shape}")
+print(f"Duplication Rate:          {dup_rate:.2f}%")
+
+if dup_rate < 1.0:
+    print("SUCCESS: Duplication resolved.")
+else:
+    print("NOTE: Some duplicates remain.")
+
+weighted_features = pd.DataFrame(weighted_features, index=embeddings.index)
+
+import geopandas as gpd
+
+zoning_file = "Town_Zoning.shp"
+zoning_df = gpd.read_file(zoning_file)
+zoning_df = zoning_df.to_crs(regions_gdf.crs)
+regions_with_zones_gdf = gpd.sjoin(regions_gdf, zoning_df, how='inner', predicate='intersects')
+
+X_tuning = weighted_features.loc[regions_with_zones_gdf.index]
+y_true = regions_with_zones_gdf['Zoning']
+
+print(f"Data Aligned! Tuning set shape: {X_tuning.shape}")
+print(f"True labels (y_true) shape: {y_true.shape}")
+
+print("Distribution of Zoning Categories:")
+print(y_true.value_counts())
+len(y_true.unique())
+
+import folium
+import matplotlib.colors as mcolors
+
+# Join y_true (zoning labels) with regions_gdf (geometries)
+regions_with_zoning_for_plot = regions_gdf.join(y_true, how='inner')
+
+# Ensure the index is named 'region_id' for mapping
+if regions_with_zoning_for_plot.index.name != 'region_id':
+    regions_with_zoning_for_plot.index.name = 'region_id'
+
+# Get unique zoning categories
+unique_zones = regions_with_zoning_for_plot['Zoning'].unique()
+num_zones = len(unique_zones)
+
+# Create a color map for zoning categories
+# Using a qualitative colormap from Matplotlib or generating distinct colors
+colors = plt.cm.get_cmap('tab20', num_zones).colors # Use tab20 for up to 20 categories, adjust if more
+color_map = {zone: mcolors.to_hex(colors[i]) for i, zone in enumerate(unique_zones)}
+
+# Add color column to the GeoDataFrame
+regions_with_zoning_for_plot['color'] = regions_with_zoning_for_plot['Zoning'].map(color_map)
+
+# Get the centroid of the entire area for map centering
+map_center = regions_with_zoning_for_plot.unary_union.centroid
+
+# Create a Folium map
+m = folium.Map(location=[map_center.y, map_center.x],
+               zoom_start=12,
+               zoom_control=True,
+               zoom_delta=0.25,        # smaller zoom steps
+               zoom_snap=0.25,
+               tiles='CartoDB Voyager')
+
+# Add choropleth layer for each zoning category
+for zone in unique_zones:
+    zone_gdf = regions_with_zoning_for_plot[regions_with_zoning_for_plot['Zoning'] == zone]
+    folium.GeoJson(
+        zone_gdf.to_json(),
+        name=f'Zoning: {zone}',
+        style_function=lambda feature, color=color_map[zone]: {
+            'fillColor': color,
+            'color': color,
+            'weight': 0.5,
+            'fillOpacity': 0.7
+        },
+        tooltip=folium.GeoJsonTooltip(fields=['Zoning'], aliases=['Zoning Category: '])
+    ).add_to(m)
+
+# Add a layer control to toggle zoning layers
+folium.LayerControl().add_to(m)
+
+print("Interactive choropleth map of ground truth zoning labels displayed below.")
+display(m)
+
+# Save folium map
+m.save('zoning_map_r10.html')
+
+zoning_clusters = regions_with_zoning_for_plot
+zoning_clusters['Zoning'].unique()
+zoning_clusters.replace({'Zoning': {'R-4  Low Density Residential': 0}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'R-5  Transitional Residential': 1}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'PR  Planned Residential': 2}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'RD  Research and Development': 3}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'DC  Downtown Commercial': 4}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'UNIV  University': 5}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'IN  Industrial': 6}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'O  Office': 7}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'RM-48  Medium Density Multiunit Residential': 8}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'PMH  Planned Manufactured Home': 9}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'GC  General Commercial': 10}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'RM-27  Low Density Multiunit Residential': 11}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'MXD  Mixed Use Development': 12}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'PC  Planned Commercial': 13}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'OTR  Old Town Residential': 14}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'RR-1  Rural Residential 1': 15}}, inplace=True)
+zoning_clusters.replace({'Zoning': {'RR-2  Rural Residential 2': 16}}, inplace=True)
+zoning_clusters = zoning_clusters.drop(columns=['geometry', 'region_id_right', 'color'])
+zoning_clusters['Zoning'].unique()
+
+zoning_clusters.to_csv(f'zoning_r{RES}.csv', index=True)
+
+from sklearn.cluster import DBSCAN
+
+dbscan = DBSCAN(eps=.75, min_samples=5)
+dbscan_labels = dbscan.fit_predict(weighted_features)
+
+regions_gdf['dbscan_cluster'] = dbscan_labels
+
+sil_dbscan = silhouette_score(weighted_features, dbscan_labels, sample_size=10000, random_state=42)
+
+print(f"DBSCAN Clusters Created: {len(np.unique(dbscan_labels))}")
+print(f"DBSCAN Silhouette Score: {sil_dbscan:.4f}")
+
+dbscan_plot_gdf = regions_gdf[['geometry', 'dbscan_cluster']].reset_index()
+
+print("GeoDataFrame for DBSCAN cluster plotting created.")
+print(dbscan_plot_gdf.head())
+
+import folium
+import matplotlib.colors as mcolors
+
+# 2. Identify all unique cluster IDs
+unique_clusters_dbscan = dbscan_plot_gdf['dbscan_cluster'].unique()
+num_clusters_dbscan = len(unique_clusters_dbscan)
+
+# 3. Create a color map for DBSCAN clusters, with special handling for noise points
+# Use a qualitative colormap for positive cluster IDs
+# Adjust 'tab20' or similar based on the expected number of clusters, plus one for noise
+colors_dbscan = plt.cm.get_cmap('tab20', max(0, num_clusters_dbscan - 1)).colors # Exclude -1 from colormap sizing
+
+cluster_color_map_dbscan = {}
+color_idx = 0
+for cluster_id in sorted(unique_clusters_dbscan):
+    if cluster_id == -1:
+        cluster_color_map_dbscan[cluster_id] = '#808080'  # Grey for noise points
+    else:
+        # Ensure we don't go out of bounds for the colormap
+        cluster_color_map_dbscan[cluster_id] = mcolors.to_hex(colors_dbscan[color_idx % len(colors_dbscan)])
+        color_idx += 1
+
+# 4. Add color column to the GeoDataFrame for plotting
+dbscan_plot_gdf['color'] = dbscan_plot_gdf['dbscan_cluster'].map(cluster_color_map_dbscan)
+
+# 5. Get the centroid of the entire area for map centering
+map_center_dbscan = dbscan_plot_gdf.unary_union.centroid
+
+# 6. Create a Folium map
+m_dbscan_clusters = folium.Map(location=[map_center_dbscan.y, map_center_dbscan.x], zoom_start=12, tiles='CartoDB Voyager')
+
+# 7. Add choropleth layer for each cluster
+for cluster_id in sorted(unique_clusters_dbscan):
+    cluster_gdf_dbscan = dbscan_plot_gdf[dbscan_plot_gdf['dbscan_cluster'] == cluster_id]
+    label = f'Noise (-1)' if cluster_id == -1 else f'Cluster: {cluster_id}'
+    folium.GeoJson(
+        cluster_gdf_dbscan.to_json(),
+        name=label,
+        style_function=lambda feature, color=cluster_color_map_dbscan[cluster_id]: {
+            'fillColor': color,
+            'color': 'black',
+            'weight': 0.5,
+            'fillOpacity': 0.7
+        },
+        tooltip=folium.GeoJsonTooltip(fields=['dbscan_cluster'], aliases=['DBSCAN Cluster ID: '])
+    ).add_to(m_dbscan_clusters)
+
+# 8. Add a layer control to toggle cluster layers
+folium.LayerControl().add_to(m_dbscan_clusters)
+
+print("Interactive choropleth map of DBSCAN clusters displayed below.")
+# 9. Display the map
+display(m_dbscan_clusters)

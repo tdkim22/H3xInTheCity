@@ -1,3 +1,6 @@
+# Computer
+os
+
 # Core Data Science
 numpy
 pandas
@@ -8,9 +11,12 @@ seaborn
 scikit-learn
 plotly
 quackosm
+contextily
+
 # Geospatial & H3
 h3
 srai
+srai[osm]
 hdbscan
 
 # Deep Learning (for Hex2Vec)
