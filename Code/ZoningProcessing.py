@@ -11,9 +11,7 @@ warnings.filterwarnings('ignore')
 warnings.simplefilter('ignore', FutureWarning)
 warnings.simplefilter('ignore', UserWarning)
 warnings.simplefilter('ignore', DeprecationWarning)
-os.environ["PYTHONWARNINGS"] = "ignore" # Suppress at system level
-
-# Silence Pytorch Lightning & Library logs
+os.environ["PYTHONWARNINGS"] = "ignore" 
 logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
 logging.getLogger("srai").setLevel(logging.WARNING)
 
@@ -30,7 +28,7 @@ from srai.regionalizers import geocode_to_region_gdf, H3Regionalizer
 from srai.joiners import IntersectionJoiner
 from srai.embedders import Hex2VecEmbedder
 from srai.neighbourhoods import H3Neighbourhood
-from srai.loaders.osm_loaders.filters import HEX2VEC_FILTER # This filter is used for loading specific OSM data
+from srai.loaders.osm_loaders.filters import HEX2VEC_FILTER 
 from srai.plotting import plot_regions
 
 # --- 4. Machine Learning & Torch ---
@@ -52,32 +50,24 @@ torch.set_float32_matmul_precision('medium')
 pd.set_option('display.max_columns', None)
 pd.set_option('mode.chained_assignment', None)
 
-# Matplotlib inline
 %matplotlib inline
-
 print("Libraries loaded. Environment configured for clean output.")
 
 # =====================================================
-# 2.1 GLOBAL REPRODUCIBILITY SETUP
+# GLOBAL REPRODUCIBILITY SETUP
 # =====================================================
 # Setting seeds ensures that the Neural Network (Hex2Vec)
 # and other stochastic processes produce the exact same
 # results every time you run this notebook.
 
 def set_global_seed(seed=42):
-    # 1. Python's built-in random module
     random.seed(seed)
-
-    # 2. NumPy (used for mathematical operations and arrays)
     np.random.seed(seed)
-
-    # 3. PyTorch (used by Hex2Vec for weights initialization)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    # 4. PyTorch Lightning (manages the training loop)
-    # This is the most important one for the SRAI library
+    # PyTorch Lightning (manages the training loop)
     pl.seed_everything(seed, workers=True)
 
 # Apply the seed
@@ -89,17 +79,21 @@ RESOLUTION = 10
 AREA = "Blacksburg, VA"
 ZONING_FILE = "Town_Zoning.shp"
 
+# Defines a Blacksburg-shaped polygon
 area = geocode_to_region_gdf(AREA)
 loader = OSMPbfLoader()
 loader_gdf = loader.load(area, HEX2VEC_FILTER)
 
+# Loads H3 hexes at the desired resolution
 regionalizer = H3Regionalizer(resolution=RESOLUTION)
 regions_gdf = regionalizer.transform(loader_gdf)
 
+# Keeps only the hexes intersecting with Blacksburg
 joiner = IntersectionJoiner()
 joint_gdf = joiner.transform(regions_gdf, loader_gdf)
 joint_pd = joint_gdf.reset_index()
 
+# Compute feature columns (entry has a value of 1 if feature is present, 0 if not)
 feature_columns = list(HEX2VEC_FILTER.keys())
 present_cols = [c for c in feature_columns if c in loader_gdf.columns]
 binary_feature_df = pd.DataFrame(index=loader_gdf.index)
@@ -107,10 +101,11 @@ for col in present_cols:
     binary_feature_df[col] = loader_gdf[col].notna().astype(np.int8)
 binary_feature_df.index.name = "feature_id"
 
+# Merges feature vectors with hexes
 merged_df = joint_pd.merge(
-    loader_gdf[feature_columns], # Select only the feature columns from loader_gdf
+    loader_gdf[feature_columns], 
     left_on='feature_id',
-    right_index=True, # Merge on loader_gdf's index ('feature_id')
+    right_index=True,
     how='left'
 )
 
@@ -118,26 +113,27 @@ features_per_hex = merged_df.groupby('region_id')[feature_columns].sum()
 features_per_hex.rename(columns={'region_id_left': 'region_id'}, inplace=True)
 regions_gdf = gpd.sjoin(regions_gdf, area, predicate='intersects', how='inner')
 
+# Appends latitude and longitude of hex's centroid to each hex
 coords = []
 for h3_idx in regions_gdf.index:
     lat, lng = h3.cell_to_latlng(h3_idx)
     coords.append([lat, lng])
 
+# Scales lat-long coordinates
 coords_array = np.array(coords)
 scaler = StandardScaler()
 scaled_coords = scaler.fit_transform(coords_array)
 
+# Reads in the zoning file
 zoning_df = gpd.read_file(ZONING_FILE)
 zoning_df = zoning_df.to_crs(regions_gdf.crs)
 regions_with_zones_gdf = gpd.sjoin(regions_gdf, 
                                    zoning_df, 
                                    how='inner', 
                                    predicate='intersects')
-y_true = regions_with_zones_gdf['Zoning'] # This may need to be changed if you use a different file.
-
+y_true = regions_with_zones_gdf['Zoning'] # This may need to be changed if you use a different file
 print("Distribution of Zoning Categories:")
 print(y_true.value_counts())
-
 regions_with_zoning_for_plot = regions_gdf.join(y_true, how='inner')
 
 # Get unique zoning categories
@@ -145,8 +141,7 @@ unique_zones = regions_with_zoning_for_plot['Zoning'].unique()
 num_zones = len(unique_zones)
 
 # Create a color map for zoning categories
-# Using a qualitative colormap from Matplotlib or generating distinct colors
-colors = plt.cm.get_cmap('tab20', num_zones).colors # Use tab20 for up to 20 categories, adjust if more
+colors = plt.cm.get_cmap('tab20', num_zones).colors 
 color_map = {zone: mcolors.to_hex(colors[i]) for i, zone in enumerate(unique_zones)}
 
 # Add color column to the GeoDataFrame
@@ -159,7 +154,7 @@ map_center = regions_with_zoning_for_plot.unary_union.centroid
 m = folium.Map(location=[map_center.y, map_center.x],
                zoom_start=12,
                zoom_control=True,
-               zoom_delta=0.25,        # smaller zoom steps
+               zoom_delta=0.25,    
                zoom_snap=0.25,
                tiles='CartoDB Voyager')
 
@@ -182,8 +177,8 @@ for zone in unique_zones:
 folium.LayerControl().add_to(m)
 display(m)
 
-# Save folium map
-m.save('zoning_map_r10.html')
+# Save Folium map
+m.save(f'zoning_map_r{RESOLUTION}.html')
 
 zoning_clusters = regions_with_zoning_for_plot
 zoning_clusters['Zoning'].unique()
