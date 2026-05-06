@@ -37,3 +37,8 @@ The naming convention is as follows: `{AlgorithmName}_K{NumberOfK-Rings}_R{Resol
 Computes the Adjusted Rand Index (ARI) between a clustering algorithm's cluster assignments and the Blacksburg municipal zoning data.
 ### FinalClusterCode.py
 
+
+
+
+##Clustering Output RAG Instructions and Details
+One of the RAG pipelines was built with Neo4j (the database) and Qwen2.5 (the LLM model). This runs out of a Jupyter Notebook. Prior to running, install Neo4j's desktop app. Make sure to follow instructions within the notebook for details on a database being initialized. Install Ollama and run lines in terminal for Qwen's installation when stated in the notebook. Run cells in order. Be weary of Section 9, and only run if Neo4j has be recently initialized and you are uzing a new neo4j run. (Note: if running the cell below section 9 throws errors, you likely don't need to run it).
