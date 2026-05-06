@@ -474,6 +474,7 @@ def folium_to_streamlit(fmap, height: int = 700):
 st.title("Hex2Vec + Geospatial Clustering Explorer")
 st.caption("Uses Polars for tabular aggregation and Streamlit + Folium for interactive mapping.")
 
+# Functionality allowing user input in sidebar to determine values such as target area, model name, and resolution
 with st.sidebar:
     st.header("Settings")
     place_name = st.text_input("Place", value="Blacksburg, VA")
@@ -494,7 +495,9 @@ with st.sidebar:
     run_button = st.button("Run pipeline", type="primary")
 
 
+# Performing complete data accessing, vectorization, training, clustering, mapping on run button click
 if run_button:
+    # vectorizing data and training the embeddings with user's input
     with st.spinner("Preparing data and training embeddings..."):
         (
             area,
@@ -525,6 +528,7 @@ if run_button:
     with col3:
         st.metric("Weighted dimensions", weighted_features.shape[1])
 
+    # Creating feature map 
     st.subheader("OSM feature choropleth")
     selected_feature = st.selectbox(
         "Feature to visualize",
@@ -535,6 +539,7 @@ if run_button:
     feature_map = render_feature_map(regions_gdf, features_per_hex, selected_feature)
     folium_to_streamlit(feature_map, height=650)
 
+    # Running clustering with user's desired model
     st.subheader(f"{model_name} clustering")
     with st.spinner(f"Running {model_name}..."):
         labels, meta, sil = run_clustering(model_name, weighted_features, n_clusters)
@@ -544,9 +549,11 @@ if run_button:
     meta_cols[1].metric("Silhouette", "N/A" if np.isnan(sil) else f"{sil:.4f}")
     meta_cols[2].metric("Noise points", meta.get("noise_points", 0))
 
+    # Mapping clusters
     cluster_map = render_cluster_map(regions_gdf, labels, cluster_name=f"{model_name.lower()}_cluster")
     folium_to_streamlit(cluster_map, height=700)
 
+    # Allowing user to download cluster assignments
     results_df = pd.DataFrame({
         "region_id": weighted_features.index,
         "cluster": labels,
@@ -559,6 +566,7 @@ if run_button:
         mime="text/csv",
     )
 
+    # Providing a summary of run
     with st.expander("Run summary"):
         st.json({
             "place": place_name,
